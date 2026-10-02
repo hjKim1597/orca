@@ -40,13 +40,14 @@ function fixture() {
   let now = 1000
   let selected = '%0'
   let unverifiable = false
+  let noClient = false
   let current: TmuxManagedPty | null = root
   let retired = false
   const store = createAgentStatusStore({ epoch: 'tmux-test', mode: 'authority' })
   const publish = vi.fn()
   const unavailable = vi.fn()
-  const probe = vi.fn(async () =>
-    unverifiable ? null : { clients: [{ pid: 101, pane: selected }], rows }
+  const probe = vi.fn(async (_socket: string, _roots: readonly number[]) =>
+    unverifiable ? null : { clients: noClient ? [] : [{ pid: 101, pane: selected }], rows }
   )
   const owner = new TmuxAgentHookOwner({
     store: () => store,
@@ -80,6 +81,9 @@ function fixture() {
     },
     select: (pane: string) => {
       selected = pane
+    },
+    detach: () => {
+      noClient = true
     },
     disconnect: () => {
       unverifiable = true
@@ -138,8 +142,46 @@ describe('tmux canonical hook ownership', () => {
     other.advance()
     other.select('%9')
     await other.owner.refresh()
-    expect(other.unavailable).toHaveBeenCalledWith(paneKey)
+    expect(other.unavailable).toHaveBeenCalledWith(
+      paneKey,
+      expect.objectContaining({ kind: 'pty', paneKey })
+    )
     expect(other.publish).toHaveBeenCalledTimes(1)
+  })
+
+  it('clears the attachment on a successful empty client proof while preserving inner observations', async () => {
+    const f = setup()
+    await f.ingest('%0', 'SessionIdle', 'completed')
+    f.advance()
+    f.detach()
+    await f.owner.refresh()
+    expect(f.unavailable).toHaveBeenCalledTimes(1)
+    expect(f.store.getParents()).toHaveLength(1)
+    f.advance()
+    await f.owner.refresh()
+    expect(f.unavailable).toHaveBeenCalledTimes(1)
+  })
+
+  it('visits every socket through bounded rounds instead of skipping inventories larger than sixteen', async () => {
+    const f = setup()
+    for (let index = 0; index < 34; index++) {
+      await f.owner.ingest(
+        'opencode',
+        {
+          paneKey: `tab-${index}:22222222-2222-4222-8222-222222222222`,
+          worktreeId: 'workspace',
+          tmux: { socket: `/tmp/socket-${index}`, pane: '%0' },
+          payload: { hook_event_name: 'SessionBusy', prompt: 'work' }
+        },
+        'dev'
+      )
+    }
+    for (let round = 0; round < 3; round++) {
+      f.advance()
+      await f.owner.refresh()
+    }
+    expect(new Set(f.probe.mock.calls.map((call) => call[0])).size).toBe(34)
+    expect(f.probe).toHaveBeenCalledTimes(49)
   })
 
   it('retires inner observations on certified root replacement or outer exit', async () => {
@@ -149,7 +191,10 @@ describe('tmux canonical hook ownership', () => {
     f.replace()
     await f.owner.refresh()
     expect(f.store.getParents()).toHaveLength(0)
-    expect(f.unavailable).toHaveBeenCalledWith(paneKey)
+    expect(f.unavailable).toHaveBeenCalledWith(
+      paneKey,
+      expect.objectContaining({ kind: 'pty', paneKey })
+    )
     const other = setup()
     await other.ingest('%0', 'SessionBusy', 'working')
     other.owner.clearPane(paneKey)

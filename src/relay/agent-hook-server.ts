@@ -1,5 +1,4 @@
-import type { TmuxAgentHookOwner } from '../shared/tmux-agent-hook-owner'
-import { createRelayTmuxHookOwner } from './relay-tmux-hook-owner'
+import { RelayAgentHookCanonicalStatus } from './agent-hook-canonical-status'
 import type {
   RelayHookForward,
   RelayHookServerOptions,
@@ -46,7 +45,7 @@ import { ingestRelayHookSpoolRecord } from './agent-hook-spool-ingest'
 import { AgentHookResultRetryScheduler } from './agent-hook-result-retry-scheduler'
 import { MAX_CACHED_PANES, selectReplayableCachedPanes } from './agent-hook-cached-pane-status'
 
-export class RelayAgentHookServer {
+export class RelayAgentHookServer extends RelayAgentHookCanonicalStatus {
   private server: ReturnType<typeof createServer> | null = null
   private port = 0
   private token = ''
@@ -71,10 +70,9 @@ export class RelayAgentHookServer {
   private portFallbackApplied = false
   private readonly presenceChecks = new RelayAgentPresence()
   private retryScheduler: AgentHookResultRetryScheduler
-  private tmuxOwner: TmuxAgentHookOwner | undefined
-  private createTmuxOwner: () => TmuxAgentHookOwner | undefined = () => undefined
 
   constructor(options: RelayHookServerOptions) {
+    super()
     this.env = options.env ?? REMOTE_AGENT_HOOK_ENV
     this.endpointDir = options.endpointDir ?? defaultEndpointDir()
     this.endpointFilePath = join(this.endpointDir, getEndpointFileName())
@@ -82,17 +80,7 @@ export class RelayAgentHookServer {
     this.preferredPort = options.preferredPort ?? 0
     this.forward = options.forward
     this.isPaneSurfaceRetired = options.isPaneSurfaceRetired ?? (() => false)
-    this.createTmuxOwner = () =>
-      createRelayTmuxHookOwner({
-        getRoot: options.getTmuxManagedPty,
-        isRetired: this.isPaneSurfaceRetired,
-        getPrevious: (paneKey) => this.state.lastStatusByPaneKey.get(paneKey),
-        clearProjection: (paneKey) => this.clearPaneState(paneKey, true),
-        publish: (event) => {
-          this.applyEvent(event, event.source ?? 'opencode')
-        },
-        forwardUnavailable: options.forwardUnavailable
-      })
+    this.configureCanonicalHooks(options, (paneKey) => this.clearPaneState(paneKey, true))
     this.retryScheduler = new AgentHookResultRetryScheduler({
       state: this.state,
       env: this.env,
@@ -107,7 +95,7 @@ export class RelayAgentHookServer {
     if (this.server) {
       return
     }
-    this.tmuxOwner ??= this.createTmuxOwner()
+    this.startCanonicalHooks()
     this.token = this.fixedToken ?? randomUUID()
     this.endpointFileWritten = false
     this.portFallbackApplied = false
@@ -191,8 +179,7 @@ export class RelayAgentHookServer {
     this.port = 0
     this.token = ''
     this.endpointFileWritten = false
-    this.tmuxOwner?.stop()
-    this.tmuxOwner = undefined
+    this.stopCanonicalHooks()
     this.retryScheduler.clearAll()
     clearAllListenerCaches(this.state)
     this.lastEnvelopeMetaByPaneKey.clear()
@@ -214,7 +201,7 @@ export class RelayAgentHookServer {
         buildRelayHookEnvelope(event, meta.source, meta.env, meta.version, { isReplay: true })
       )
     }
-    return replayable.length
+    return replayable.length + this.replayCanonicalHooks()
   }
 
   checkAgentPresence(paneKey: string): Promise<void> {
@@ -234,7 +221,7 @@ export class RelayAgentHookServer {
   /** Drop a paneKey's cached entries on PTY exit so a terminated pane can't resurface as a ghost event on reconnect. */
   clearPaneState(paneKey: string, preserveTmuxInnerSubjects = false): void {
     if (!preserveTmuxInnerSubjects) {
-      this.tmuxOwner?.clearPane(paneKey)
+      this.clearCanonicalPane(paneKey)
     }
     this.retryScheduler.clearAssistantMessageRetry(paneKey)
     this.retryScheduler.clearTranscriptPoll(paneKey)
@@ -266,8 +253,7 @@ export class RelayAgentHookServer {
       env: this.env,
       state: this.state,
       applyEvent: (event, source, env, version) => this.applyEvent(event, source, env, version),
-      ingestTmuxHook: (source, body) =>
-        this.tmuxOwner?.ingest(source, body, this.env) ?? Promise.resolve(false),
+      ingestTmuxHook: (source, body) => this.ingestCanonicalTmuxHook(source, body, this.env),
       retryScheduler: this.retryScheduler,
       transportInterference: this.transportInterference
     })
@@ -280,6 +266,9 @@ export class RelayAgentHookServer {
     version?: string,
     options: { isReplay?: boolean; checkPresence?: boolean } = {}
   ): AgentHookEventPayload | undefined {
+    if (this.isCanonicalPane(incoming.paneKey)) {
+      return undefined
+    }
     const transitioned = transitionHookPresence(
       incoming,
       this.state.lastStatusByPaneKey.get(incoming.paneKey)

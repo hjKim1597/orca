@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto'
 import { normalizeHookPayload } from './agent-hook-listener'
 import {
   createHookListenerState,
@@ -7,7 +6,8 @@ import {
 import type { AgentHookEventPayload } from './agent-hook-listener/listener-event'
 import type { AgentHookSource } from './agent-hook-relay'
 import type { AgentStatusStore } from './agent-status-store'
-import { normalizeAgentStatusPayload } from './agent-status-types'
+import { continueMainAgentStatus } from './agent-lead-status-fold'
+import { tmuxCanonicalStatusEvent, tmuxInnerSubject } from './tmux-selected-status'
 import type { AgentStatusExecutionScope, AgentStatusPtySubject } from './agent-status-subject'
 import {
   readTmuxHookPane,
@@ -43,13 +43,19 @@ export class TmuxAgentHookOwner {
   private refreshing: Promise<void> | undefined
   private stopped = false
   private lastRefreshAt = -Infinity
+  private socketCursor = 0
 
   constructor(
     private readonly options: {
       store: () => AgentStatusStore
       getRoot: (paneKey: string) => Promise<TmuxManagedPty | null>
-      publish: (event: AgentHookEventPayload, observedAt: number) => void
-      unavailable: (paneKey: string) => void
+      publish: (
+        event: AgentHookEventPayload,
+        observedAt: number,
+        subject: AgentStatusPtySubject,
+        stateStartedAt: number
+      ) => void
+      unavailable: (paneKey: string, subject?: AgentStatusPtySubject) => void
       probe?: typeof probeTmuxHostAttachments
       isRetired?: (paneKey: string) => boolean
       now?: () => number
@@ -114,13 +120,24 @@ export class TmuxAgentHookOwner {
     }
     const observedAt = this.now()
     const stateStartedAt =
-      previous?.state === event.payload.state ? previous.stateStartedAt : observedAt
+      previous?.state === event.payload.state && previous.workingMode === event.payload.workingMode
+        ? previous.stateStartedAt
+        : observedAt
     store.applyMutation({
       parent: {
         subject: inner.subject,
         firstObservedAt: previousParent?.firstObservedAt ?? observedAt,
         status: {
           ...event.payload,
+          ...(event.payload.mainAgent
+            ? {
+                mainAgent: continueMainAgentStatus(
+                  previous?.mainAgent,
+                  event.payload.mainAgent,
+                  observedAt
+                )
+              }
+            : {}),
           paneKey: inner.subject.paneKey,
           tabId: event.tabId,
           worktreeId: root.scope.workspaceId,
@@ -148,14 +165,7 @@ export class TmuxAgentHookOwner {
   private inner(outer: OuterPane, tmux: TmuxHookPane) {
     let inner = outer.inner.get(tmux.pane)
     if (!inner && outer.inner.size < 32) {
-      const digest = createHash('sha256')
-        .update(`${outer.paneKey}\0${outer.socket}\0${tmux.pane}`)
-        .digest('hex')
-      const subject: AgentStatusPtySubject = {
-        ...outer.root.scope,
-        kind: 'pty',
-        paneKey: INNER_PREFIX + digest
-      }
+      const subject = tmuxInnerSubject(outer.root.scope, outer.paneKey, tmux)
       inner = { subject, normalization: createHookListenerState() }
       outer.inner.set(tmux.pane, inner)
     }
@@ -186,44 +196,60 @@ export class TmuxAgentHookOwner {
       group.push(outer)
       groups.set(outer.socket, group)
     }
-    if (groups.size > 16) {
-      return
+    const entries = [...groups]
+    const start = this.socketCursor % Math.max(entries.length, 1)
+    const selected = entries.slice(start).concat(entries.slice(0, start)).slice(0, 16)
+    this.socketCursor = (start + selected.length) % Math.max(entries.length, 1)
+    for (let index = 0; index < selected.length; index += 2) {
+      await Promise.all(
+        selected.slice(index, index + 2).map(async ([socket, outers]) => {
+          const proof = await (this.options.probe ?? probeTmuxHostAttachments)(
+            socket,
+            outers.map((outer) => outer.root.pid)
+          ).catch(() => null)
+          if (!proof || this.stopped) {
+            return
+          }
+          for (const outer of outers) {
+            if (this.outers.get(outer.paneKey) !== outer) {
+              continue
+            }
+            const current = await this.options.getRoot(outer.paneKey).catch(() => null)
+            if (this.options.isRetired?.(outer.paneKey)) {
+              this.clearPane(outer.paneKey)
+              continue
+            }
+            if (!current) {
+              continue
+            }
+            if (current.incarnation !== outer.root.incarnation || current.pid !== outer.root.pid) {
+              this.clearPane(outer.paneKey)
+              this.options.unavailable(outer.paneKey, {
+                ...outer.root.scope,
+                kind: 'pty',
+                paneKey: outer.paneKey
+              })
+              continue
+            }
+            const client = resolveTmuxClientAttachment(outer.root.pid, proof.clients, proof.rows)
+            if (!client) {
+              outer.selection = undefined
+              if (outer.publication !== 'unattached') {
+                outer.publication = 'unattached'
+                this.options.unavailable(outer.paneKey, {
+                  ...outer.root.scope,
+                  kind: 'pty',
+                  paneKey: outer.paneKey
+                })
+              }
+              continue
+            }
+            outer.selection = client.pane
+            this.project(outer)
+          }
+        })
+      )
     }
-    await Promise.all(
-      [...groups].map(async ([socket, outers]) => {
-        const proof = await (this.options.probe ?? probeTmuxHostAttachments)(
-          socket,
-          outers.map((outer) => outer.root.pid)
-        ).catch(() => null)
-        if (!proof || this.stopped) {
-          return
-        }
-        for (const outer of outers) {
-          if (this.outers.get(outer.paneKey) !== outer) {
-            continue
-          }
-          const current = await this.options.getRoot(outer.paneKey).catch(() => null)
-          if (this.options.isRetired?.(outer.paneKey)) {
-            this.clearPane(outer.paneKey)
-            continue
-          }
-          if (!current) {
-            continue
-          }
-          if (current.incarnation !== outer.root.incarnation || current.pid !== outer.root.pid) {
-            this.clearPane(outer.paneKey)
-            this.options.unavailable(outer.paneKey)
-            continue
-          }
-          const client = resolveTmuxClientAttachment(outer.root.pid, proof.clients, proof.rows)
-          if (!client) {
-            continue
-          }
-          outer.selection = client.pane
-          this.project(outer)
-        }
-      })
-    )
   }
 
   private project(outer: OuterPane): void {
@@ -238,42 +264,20 @@ export class TmuxAgentHookOwner {
       return
     }
     outer.publication = key
-    const changed = outer.projectedPane !== undefined && outer.projectedPane !== outer.selection
     outer.projectedPane = outer.selection
-    if (changed && status) {
-      this.options.unavailable(outer.paneKey)
-    }
     if (!status) {
-      this.options.unavailable(outer.paneKey)
+      this.options.unavailable(outer.paneKey, {
+        ...outer.root.scope,
+        kind: 'pty',
+        paneKey: outer.paneKey
+      })
       return
     }
-    const payload = normalizeAgentStatusPayload(status)
-    if (!payload) {
-      return
-    }
-    const source = status.agentType === 'opencode2' ? 'opencode2' : 'opencode'
     this.options.publish(
-      {
-        paneKey: outer.paneKey,
-        source,
-        tabId: status.tabId,
-        worktreeId: status.worktreeId,
-        connectionId: null,
-        launchToken: status.launchToken,
-        providerSession: status.providerSession,
-        hasExplicitPrompt: status.prompt.length > 0,
-        promptInteractionKey: status.promptInteractionKey,
-        hookEventName:
-          status.state === 'done'
-            ? 'SessionIdle'
-            : status.state === 'waiting'
-              ? status.toolName
-                ? 'PermissionRequest'
-                : 'AskUserQuestion'
-              : 'SessionBusy',
-        payload
-      },
-      status.evidenceObservedAt ?? status.receivedAt
+      { ...tmuxCanonicalStatusEvent(status), paneKey: outer.paneKey },
+      status.evidenceObservedAt ?? status.receivedAt,
+      { ...outer.root.scope, kind: 'pty', paneKey: outer.paneKey },
+      status.stateStartedAt
     )
   }
 

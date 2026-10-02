@@ -12,7 +12,11 @@ const MAX_PROCESS_ROWS = 256
 
 async function readSelectedRows(pids: readonly number[]): Promise<ProcessTableRow[]> {
   if (pids.length > 16) {
-    throw new Error('tmux_process_capture_over_limit')
+    const rows: ProcessTableRow[] = []
+    for (let index = 0; index < pids.length; index += 16) {
+      rows.push(...(await readSelectedRows(pids.slice(index, index + 16))))
+    }
+    return rows
   }
   if (pids.length > 1) {
     const rows = await Promise.all(pids.map((pid) => readSelectedRows([pid])))

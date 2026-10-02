@@ -1,5 +1,5 @@
-import { randomUUID } from 'node:crypto'
-import { createAgentStatusStore } from '../shared/agent-status-store'
+import type { AgentStatusStore } from '../shared/agent-status-store'
+import { commitTmuxSelectedStatus, commitTmuxUnavailable } from '../shared/tmux-selected-status'
 import { TmuxAgentHookOwner, type TmuxManagedPty } from '../shared/tmux-agent-hook-owner'
 import type { AgentHookEventPayload } from '../shared/agent-hook-listener/listener-event'
 import type { AgentHookUnavailableEnvelope } from '../shared/agent-hook-relay'
@@ -7,34 +7,38 @@ import type { AgentHookUnavailableEnvelope } from '../shared/agent-hook-relay'
 export function createRelayTmuxHookOwner(options: {
   getRoot?: (paneKey: string) => Promise<TmuxManagedPty | null>
   isRetired: (paneKey: string) => boolean
-  getPrevious: (paneKey: string) => AgentHookEventPayload | undefined
-  clearProjection: (paneKey: string) => void
+  store: () => AgentStatusStore
   publish: (event: AgentHookEventPayload) => void
   forwardUnavailable?: (envelope: AgentHookUnavailableEnvelope) => void
 }): TmuxAgentHookOwner | undefined {
   if (!options.getRoot) {
     return undefined
   }
-  const store = createAgentStatusStore({ epoch: randomUUID(), mode: 'authority' })
   return new TmuxAgentHookOwner({
-    store: () => store,
+    store: options.store,
     getRoot: options.getRoot,
     isRetired: options.isRetired,
-    publish: (event, observedAt) =>
-      options.publish({ ...event, hostEvidenceObservedAt: observedAt }),
-    unavailable: (paneKey) => {
-      const previous = options.getPrevious(paneKey)
-      options.clearProjection(paneKey)
-      options.forwardUnavailable?.({
-        source: previous?.source === 'opencode2' ? 'opencode2' : 'opencode',
-        paneKey,
-        tabId: previous?.tabId,
-        worktreeId: previous?.worktreeId,
-        launchToken: previous?.launchToken,
-        connectionId: null,
-        statusUnavailable: true,
-        payload: null
-      })
+    publish: (event, observedAt, subject, stateStartedAt) => {
+      const status = commitTmuxSelectedStatus(
+        options.store(),
+        subject,
+        event,
+        observedAt,
+        stateStartedAt
+      )
+      if (!status) {
+        return
+      }
+      options.publish({ ...event, hostEvidenceObservedAt: status.evidenceObservedAt })
+    },
+    unavailable: (_paneKey, subject) => {
+      if (!subject) {
+        return
+      }
+      const envelope = commitTmuxUnavailable(options.store(), subject)
+      if (envelope) {
+        options.forwardUnavailable?.(envelope)
+      }
     }
   })
 }
