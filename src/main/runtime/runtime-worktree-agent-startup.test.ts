@@ -155,6 +155,23 @@ describe('buildWorktreeStartupForAgent prompt carry', () => {
     expect(result.followup?.prompt).toBe(prompt)
   })
 
+  it('leaves a multi-line Windows prompt to a caller whose paste is main’s, not a launch file', () => {
+    const onPromptCarry = vi.fn()
+    const result = buildWorktreeStartupForAgent({
+      repo: makeRepo({}),
+      settings,
+      agent: 'claude',
+      prompt: 'summarize the diff\nthen list the risks',
+      getLaunchPlatform: () => 'win32',
+      toSessionOptions: () => undefined,
+      onPromptCarry,
+      promptPaste: 'once-agent-runs'
+    })
+    expect(onPromptCarry).toHaveBeenCalledExactlyOnceWith(false)
+    expect(result.startup.launchFile).toBeUndefined()
+    expect(result.startup.command).not.toContain('summarize')
+  })
+
   it('reports that prompt uncarried, with no follow-up, to a caller that pastes it itself', () => {
     const onPromptCarry = vi.fn()
     const result = buildWorktreeStartupForAgent({
