@@ -144,7 +144,8 @@ describe('tmux canonical hook ownership', () => {
     await other.owner.refresh()
     expect(other.unavailable).toHaveBeenCalledWith(
       paneKey,
-      expect.objectContaining({ kind: 'pty', paneKey })
+      expect.objectContaining({ kind: 'pty', paneKey }),
+      expect.objectContaining({ source: 'opencode' })
     )
     expect(other.publish).toHaveBeenCalledTimes(1)
   })
@@ -193,7 +194,8 @@ describe('tmux canonical hook ownership', () => {
     expect(f.store.getParents()).toHaveLength(0)
     expect(f.unavailable).toHaveBeenCalledWith(
       paneKey,
-      expect.objectContaining({ kind: 'pty', paneKey })
+      expect.objectContaining({ kind: 'pty', paneKey }),
+      expect.objectContaining({ source: 'opencode' })
     )
     const other = setup()
     await other.ingest('%0', 'SessionBusy', 'working')

@@ -26,7 +26,6 @@ type OuterPane = {
   socket: string
   root: TmuxManagedPty
   inner: Map<string, { subject: AgentStatusPtySubject; normalization: HookListenerState }>
-  projectedPane?: string
   selection?: string
   publication?: string
 }
@@ -55,7 +54,11 @@ export class TmuxAgentHookOwner {
         subject: AgentStatusPtySubject,
         stateStartedAt: number
       ) => void
-      unavailable: (paneKey: string, subject?: AgentStatusPtySubject) => void
+      unavailable: (
+        paneKey: string,
+        subject?: AgentStatusPtySubject,
+        identity?: AgentHookEventPayload
+      ) => void
       probe?: typeof probeTmuxHostAttachments
       isRetired?: (paneKey: string) => boolean
       now?: () => number
@@ -223,12 +226,8 @@ export class TmuxAgentHookOwner {
               continue
             }
             if (current.incarnation !== outer.root.incarnation || current.pid !== outer.root.pid) {
+              this.unavailable(outer)
               this.clearPane(outer.paneKey)
-              this.options.unavailable(outer.paneKey, {
-                ...outer.root.scope,
-                kind: 'pty',
-                paneKey: outer.paneKey
-              })
               continue
             }
             const client = resolveTmuxClientAttachment(outer.root.pid, proof.clients, proof.rows)
@@ -236,11 +235,7 @@ export class TmuxAgentHookOwner {
               outer.selection = undefined
               if (outer.publication !== 'unattached') {
                 outer.publication = 'unattached'
-                this.options.unavailable(outer.paneKey, {
-                  ...outer.root.scope,
-                  kind: 'pty',
-                  paneKey: outer.paneKey
-                })
+                this.unavailable(outer)
               }
               continue
             }
@@ -250,6 +245,17 @@ export class TmuxAgentHookOwner {
         })
       )
     }
+  }
+
+  private unavailable(outer: OuterPane): void {
+    const status = [...outer.inner.values()]
+      .map(({ subject }) => this.options.store().getParent(subject)?.status)
+      .find(Boolean)
+    this.options.unavailable(
+      outer.paneKey,
+      { ...outer.root.scope, kind: 'pty', paneKey: outer.paneKey },
+      status ? tmuxCanonicalStatusEvent(status) : undefined
+    )
   }
 
   private project(outer: OuterPane): void {
@@ -264,13 +270,8 @@ export class TmuxAgentHookOwner {
       return
     }
     outer.publication = key
-    outer.projectedPane = outer.selection
     if (!status) {
-      this.options.unavailable(outer.paneKey, {
-        ...outer.root.scope,
-        kind: 'pty',
-        paneKey: outer.paneKey
-      })
+      this.unavailable(outer)
       return
     }
     this.options.publish(

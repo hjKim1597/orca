@@ -1,12 +1,14 @@
 import { createHash } from 'node:crypto'
 import type { TmuxHookPane } from './tmux-client-attachment'
-import type { AgentStatusExecutionScope } from './agent-status-subject'
 import { normalizeAgentStatusPayload, type AgentStatusIpcPayload } from './agent-status-types'
 import type { AgentHookEventPayload } from './agent-hook-listener/listener-event'
 import type { AgentStatusStore } from './agent-status-store'
 import type { AgentHookUnavailableEnvelope } from './agent-hook-relay'
-import { serializeAgentStatusSubject } from './agent-status-subject'
-import type { AgentStatusPtySubject } from './agent-status-subject'
+import {
+  serializeAgentStatusSubject,
+  type AgentStatusExecutionScope,
+  type AgentStatusPtySubject
+} from './agent-status-subject'
 
 /** Commit the attachment projection in its owner's store, retaining the inner observation clock. */
 export function commitTmuxSelectedStatus(
@@ -69,23 +71,34 @@ export function tmuxCanonicalStatusEvent(status: AgentStatusIpcPayload): AgentHo
   }
 }
 
-export function commitTmuxUnavailable(store: AgentStatusStore, subject: AgentStatusPtySubject) {
+export function commitTmuxUnavailable(
+  store: AgentStatusStore,
+  subject: AgentStatusPtySubject,
+  identity?: Pick<AgentHookEventPayload, 'source' | 'tabId' | 'launchToken'>
+) {
   const previous = store.getParent(subject)
   const status = previous?.status
+  const correlation = status
+    ? {
+        source: status.agentType === 'opencode2' ? 'opencode2' : 'opencode',
+        tabId: status.tabId,
+        launchToken: status.launchToken
+      }
+    : identity
   const facts = [{ subject, key: 'tmux.unavailable', value: true }]
   store.applyMutation({
     parent: { subject, firstObservedAt: previous?.firstObservedAt ?? Date.now() },
     facts: [
       ...facts,
-      ...(status
+      ...(correlation
         ? [
             {
               subject,
               key: 'tmux.source',
-              value: status.agentType === 'opencode2' ? 'opencode2' : 'opencode'
+              value: correlation.source ?? 'opencode'
             },
-            { subject, key: 'tmux.tabId', value: status.tabId ?? null },
-            { subject, key: 'tmux.launchToken', value: status.launchToken ?? null }
+            { subject, key: 'tmux.tabId', value: correlation.tabId ?? null },
+            { subject, key: 'tmux.launchToken', value: correlation.launchToken ?? null }
           ]
         : [])
     ]

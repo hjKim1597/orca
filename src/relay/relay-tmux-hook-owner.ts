@@ -9,6 +9,7 @@ export function createRelayTmuxHookOwner(options: {
   isRetired: (paneKey: string) => boolean
   store: () => AgentStatusStore
   publish: (event: AgentHookEventPayload) => void
+  takeLegacyIdentity: (paneKey: string) => AgentHookEventPayload | undefined
   forwardUnavailable?: (envelope: AgentHookUnavailableEnvelope) => void
 }): TmuxAgentHookOwner | undefined {
   if (!options.getRoot) {
@@ -31,11 +32,12 @@ export function createRelayTmuxHookOwner(options: {
       }
       options.publish({ ...event, hostEvidenceObservedAt: status.evidenceObservedAt })
     },
-    unavailable: (_paneKey, subject) => {
+    unavailable: (paneKey, subject, identity) => {
       if (!subject) {
         return
       }
-      const envelope = commitTmuxUnavailable(options.store(), subject)
+      const prior = options.takeLegacyIdentity(paneKey)
+      const envelope = commitTmuxUnavailable(options.store(), subject, prior ?? identity)
       if (envelope) {
         options.forwardUnavailable?.(envelope)
       }

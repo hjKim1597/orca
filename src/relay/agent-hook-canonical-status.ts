@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { createAgentStatusStore } from '../shared/agent-status-store'
 import { isTmuxInnerSubject, type TmuxAgentHookOwner } from '../shared/tmux-agent-hook-owner'
 import { readTmuxUnavailable, tmuxCanonicalStatusEvent } from '../shared/tmux-selected-status'
+import type { AgentHookEventPayload } from '../shared/agent-hook-listener/listener-event'
 import type { AgentHookSource } from '../shared/agent-hook-relay'
 import { createRelayTmuxHookOwner } from './relay-tmux-hook-owner'
 import { buildRelayHookEnvelope } from './agent-hook-envelope-build'
@@ -15,12 +16,16 @@ export class RelayAgentHookCanonicalStatus {
   })
   private tmuxOwner: TmuxAgentHookOwner | undefined
   private options: RelayHookServerOptions | undefined
+  private getLegacyIdentity: (paneKey: string) => AgentHookEventPayload | undefined = () =>
+    undefined
   private clearLegacyProjection: (paneKey: string) => void = () => {}
 
   protected configureCanonicalHooks(
     options: RelayHookServerOptions,
-    clearLegacy: (paneKey: string) => void
+    clearLegacy: (paneKey: string) => void,
+    getLegacyIdentity: (paneKey: string) => AgentHookEventPayload | undefined
   ): void {
+    this.getLegacyIdentity = getLegacyIdentity
     this.options = options
     this.clearLegacyProjection = clearLegacy
   }
@@ -37,6 +42,11 @@ export class RelayAgentHookCanonicalStatus {
       publish: (event) => {
         this.clearLegacyProjection(event.paneKey)
         options.forward(buildRelayHookEnvelope(event, event.source ?? 'opencode', options.env))
+      },
+      takeLegacyIdentity: (paneKey) => {
+        const prior = this.getLegacyIdentity(paneKey)
+        this.clearLegacyProjection(paneKey)
+        return prior
       },
       forwardUnavailable: options.forwardUnavailable
     })

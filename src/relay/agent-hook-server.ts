@@ -80,7 +80,16 @@ export class RelayAgentHookServer extends RelayAgentHookCanonicalStatus {
     this.preferredPort = options.preferredPort ?? 0
     this.forward = options.forward
     this.isPaneSurfaceRetired = options.isPaneSurfaceRetired ?? (() => false)
-    this.configureCanonicalHooks(options, (paneKey) => this.clearPaneState(paneKey, true))
+    this.configureCanonicalHooks(
+      options,
+      (paneKey) => this.clearPaneState(paneKey, true),
+      (paneKey) => {
+        const row = this.state.lastStatusByPaneKey.get(paneKey)
+        return row
+          ? { ...row, source: this.lastEnvelopeMetaByPaneKey.get(paneKey)?.source ?? row.source }
+          : undefined
+      }
+    )
     this.retryScheduler = new AgentHookResultRetryScheduler({
       state: this.state,
       env: this.env,

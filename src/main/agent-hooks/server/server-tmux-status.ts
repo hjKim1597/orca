@@ -25,7 +25,6 @@ export abstract class AgentHookServerTmuxStatus extends AgentHookServerOpenCodeB
         if (this.getAgentStatusDisposition(event.paneKey, event) === 'suppress') {
           return
         }
-        this.recordCurrentAuthorityObservation(event)
         this.clearPaneState(event.paneKey, { preserveTmuxInnerSubjects: true })
         const previous = this.canonicalStatusStore.getParent(subject)?.status
         const status = commitTmuxSelectedStatus(
@@ -55,6 +54,7 @@ export abstract class AgentHookServerTmuxStatus extends AgentHookServerOpenCodeB
           promptInteractionKey: event.promptInteractionKey
         }
         this.commitStatusRowMutation(previous && structuredStatusLegacyEvent(previous), after)
+        this.recordCurrentAuthorityObservation(after)
         this.notifyStatusChangeListeners()
         this.emitEnrichedStatus(after)
       },
