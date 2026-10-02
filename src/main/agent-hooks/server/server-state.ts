@@ -163,6 +163,8 @@ export abstract class AgentHookServerState {
   )
 
   protected abstract withdrawReplayObservation(paneKey: string): void
+  protected abstract clearTmuxInnerSubjects(paneKey: string): void
+  protected abstract clearTmuxTabSubjects(tabId: string): void
   protected abstract ingestSpoolRecord(record: SpoolRecord): void
   protected abstract emitPaneStatusCleared(clear: AgentStatusClearIpcPayload): void
   protected abstract buildStatusChangeNotification(): {
@@ -272,7 +274,11 @@ export abstract class AgentHookServerState {
 
   protected abstract clearPaneState(
     paneKey: string,
-    options?: { emitStatusRowMutation?: boolean }
+    options?: {
+      emitStatusRowMutation?: boolean
+      preserveTmuxInnerSubjects?: boolean
+      statusUnavailable?: true
+    }
   ): void
   protected abstract deleteStatusEntry(
     paneKey: string,
